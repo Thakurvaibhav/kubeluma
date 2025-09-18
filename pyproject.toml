@@ -31,5 +31,8 @@ podglass = "kubeluma.cli:main"  # legacy alias
 [tool.setuptools.packages.find]
 where = ["."]
 
+[tool.setuptools.package-data]
+kubeluma = ["index.html"]
+
 [tool.kubeluma]
 default-port = 8765

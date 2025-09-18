@@ -11,7 +11,10 @@ def _exc(msg: str, exc: Exception):
     log.warning(f"{msg}: {exc.__class__.__name__}: {exc}")
 
 # Load HTML from file
-INDEX_HTML = (Path(__file__).parent / 'index.html').read_text(encoding='utf-8')
+try:
+    INDEX_HTML = (Path(__file__).parent / 'index.html').read_text(encoding='utf-8')
+except FileNotFoundError:
+    INDEX_HTML = """<!DOCTYPE html><html><body><h2>Kubeluma</h2><p>Embedded index.html missing in package. Reinstall with package data.</p></body></html>"""
 
 @dataclass
 class PodState:

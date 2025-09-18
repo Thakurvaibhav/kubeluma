@@ -21,8 +21,13 @@ header strong{font-size:18px;letter-spacing:.5px;color:var(--accent);text-shadow
 .badge.phase-UNKNOWN{color:var(--text-dim);} 
 .badge.dep{background:rgba(59,130,246,.15);color:var(--accent);}
 
-main{padding:18px;display:grid;gap:22px;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));}
+main{padding:18px;display:flex;flex-direction:column;gap:22px;}
+.row.two{display:flex;gap:22px;align-items:stretch;}
+.row.two .card{flex:1;min-width:0;}
+@media (max-width:900px){ .row.two{flex-direction:column;} }
+
 .card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;display:flex;flex-direction:column;gap:10px;position:relative;box-shadow:var(--shadow);} 
+.card.wide{grid-column:1/-1;}
 .card h3{font-size:14px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;color:var(--text-dim);} 
 .small{font-size:11px;color:var(--text-dim);} 
 .split{display:flex;flex-wrap:wrap;gap:10px;} 
@@ -56,7 +61,15 @@ button:active{transform:translateY(1px);}
 #patternActions{display:flex;gap:8px;margin-top:4px;}
 #patternCurrent{font-size:11px;color:var(--text-dim);}
 
-@media (max-width:780px){ main{grid-template-columns:1fr;} header{gap:10px;} }
+/* Status panel layout refinement */
+#statusCard #statusStats{display:flex;flex-direction:column;gap:12px;}
+.status-row{display:flex;gap:12px;width:100%;}
+.status-row.primary-row .stat{flex:1 1 25%;min-width:160px;}
+.status-row.secondary-row{flex-wrap:wrap;}
+.status-row.secondary-row .stat{flex:1 1 25%;min-width:140px;}
+@media (max-width:900px){ .status-row.primary-row .stat,.status-row.secondary-row .stat{flex:1 1 45%;} }
+@media (max-width:600px){ .status-row.primary-row .stat,.status-row.secondary-row .stat{flex:1 1 100%;} }
+/* End status panel layout refinement */
 </style></head><body>
 <div id='patternOverlay' style='display:none'>
   <div id='patternBox'>
@@ -78,32 +91,36 @@ button:active{transform:translateY(1px);}
   <button id='changePatternBtn' style='display:none;'>New Search</button>
 </header>
 <main>
-  <section class='card full' id='podsCard' style='display:none'>
-    <h3>Pods</h3>
-    <table class='tbl' id='podsTable'><thead><tr><th id='podsNameHeader' class='pointer'>Name <span id='podsNameSort'></span></th><th>Namespace</th><th>Phase</th><th>Ready</th><th>Restarts</th></tr></thead><tbody></tbody></table>
-  </section>
-  <section class='card' id='statusCard'>
-    <h3>Status</h3>
-    <div class='stat-grid' id='statusStats'></div>
-  </section>
-  <section class='card'>
-    <h3>Containers</h3>
-    <table class='tbl' id='containers'><thead><tr><th>Name</th><th>State</th><th>Restarts</th><th>Image</th></tr></thead><tbody></tbody></table>
-  </section>
-  <section class='card'>
-    <h3>Metrics</h3>
-    <table class='tbl' id='metrics'><thead><tr><th>Container</th><th>CPU (m)</th><th>Mem (MiB)</th></tr></thead><tbody></tbody></table>
-    <div class='small' id='metricsNote'></div>
-  </section>
-  <section class='card full'>
+  <div class='row two'>
+    <section class='card' id='podsCard' style='display:none'>
+      <h3>Pods</h3>
+      <table class='tbl' id='podsTable'><thead><tr><th id='podsNameHeader' class='pointer'>Name <span id='podsNameSort'></span></th><th>Namespace</th><th>Phase</th><th>Ready</th><th>Restarts</th></tr></thead><tbody></tbody></table>
+    </section>
+    <section class='card' id='statusCard'>
+      <h3>Status</h3>
+      <div id='statusStats'></div>
+    </section>
+  </div>
+  <div class='row two'>
+    <section class='card' id='containersCard'>
+      <h3>Containers</h3>
+      <table class='tbl' id='containers'><thead><tr><th>Name</th><th>State</th><th>Restarts</th><th>Image</th></tr></thead><tbody></tbody></table>
+    </section>
+    <section class='card' id='metricsCard'>
+      <h3>Metrics</h3>
+      <table class='tbl' id='metrics'><thead><tr><th>Container</th><th>CPU (m)</th><th>CPU %Req</th><th>CPU %Lim</th><th>Mem (MiB)</th><th>Mem %Req</th><th>Mem %Lim</th></tr></thead><tbody></tbody></table>
+      <div class='small' id='metricsNote'></div>
+    </section>
+  </div>
+  <section class='card' id='eventsCard'>
     <h3>Events</h3>
     <table class='tbl' id='events'><thead><tr><th>Pod</th><th>Type</th><th>Reason</th><th>Message</th><th>Age</th></tr></thead><tbody></tbody></table>
   </section>
-  <section class='card full'>
+  <section class='card' id='logsCard'>
     <h3>Logs <span id='logsPod' class='badge' style='display:none'></span> <select id='containerSelect'></select> <button id='followBtn'>Pause</button></h3>
     <div id='logs'></div>
   </section>
-  <section class='card full' id='envCard' style='display:none'>
+  <section class='card' id='envCard' style='display:none'>
     <h3>Environment Variables <select id='envContainerSelect'></select></h3>
     <table class='tbl' id='envTable'><thead><tr><th>Var</th><th>Value / Source</th></tr></thead><tbody></tbody></table>
   </section>
@@ -111,14 +128,19 @@ button:active{transform:translateY(1px);}
 <script>
 const ws = new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');
 let currentContainer=null, following=true, podName=null, podsList=[], focusPod=null, lastFocusPod=null, podSortAsc=true, patternSet=false, currentPattern=null;
+let cpuLimitRed=90, memLimitRed=80; // defaults; will update from payload if provided
+let allEvents=[]; // store all events to filter per focused pod
 // human-friendly age formatter
 function formatAge(secs){ if(secs==null) return ''; if(secs<60) return secs+'s'; const m=Math.floor(secs/60); if(m<60) return m+'m'; const h=Math.floor(m/60); if(h<24) return h+'h'; const d=Math.floor(h/24); return d+'d'; }
 ws.onopen=()=>{ ws.send(JSON.stringify({action:'subscribe',channel:'pod'})); };
 ws.onmessage=(ev)=>{ const msg=JSON.parse(ev.data);
   if(msg.type==='awaitingPattern'){ if(!patternSet){ showPatternOverlay(); updatePatternDisplay(null);} }
   else if(msg.type==='pods'){ if(msg.data && msg.data.pattern){ currentPattern=msg.data.pattern; updatePatternDisplay(currentPattern);} hidePatternOverlay(); renderPods(msg.data); }
-  else if(msg.type==='pod'){ hidePatternOverlay(); focusPod=msg.data.name; const changed=(focusPod!==lastFocusPod); lastFocusPod=focusPod; renderPod(msg.data); if(changed){ currentContainer=null; document.getElementById('logs').textContent=''; } if(!currentContainer){ const first=msg.data.containers[0]; if(first){ setContainer(first.name,true);} } }
-  else if(msg.type==='event'){ appendEvent(msg.data);} else if(msg.type==='log'){ if(msg.container===currentContainer && msg.pod===podName) appendLog(msg.line);} else if(msg.type==='metrics'){ renderMetrics(msg.data);} };
+  else if(msg.type==='pod'){ hidePatternOverlay(); focusPod=msg.data.name; const changed=(focusPod!==lastFocusPod); lastFocusPod=focusPod; renderPod(msg.data); if(changed){ currentContainer=null; document.getElementById('logs').textContent=''; renderEvents(); } if(!currentContainer){ const first=msg.data.containers[0]; if(first){ setContainer(first.name,true);} } }
+  else if(msg.type==='event'){ allEvents.push(msg.data); // keep history
+    if(allEvents.length>3000) allEvents=allEvents.slice(-3000); // cap history
+    if(msg.data.pod===focusPod){ renderEvents(); } }
+  else if(msg.type==='log'){ if(msg.container===currentContainer && msg.pod===podName) appendLog(msg.line);} else if(msg.type==='metrics'){ renderMetrics(msg.data);} };
 function updatePatternDisplay(p){ const el=document.getElementById('patternDisplay'); const btn=document.getElementById('changePatternBtn'); if(p){ el.style.display='inline-flex'; el.textContent='/' + p + '/'; btn.style.display='inline-flex'; } else { el.style.display='none'; btn.style.display='none'; } }
 function showPatternOverlay(){ document.getElementById('patternOverlay').style.display='flex'; document.getElementById('patternInput').focus(); document.getElementById('patternCancelBtn').style.display= patternSet ? 'inline-flex':'none'; }
 function hidePatternOverlay(){ document.getElementById('patternOverlay').style.display='none'; }
@@ -130,11 +152,26 @@ setTimeout(()=>{ if(!patternSet && podsList.length===0){ showPatternOverlay(); }
 function renderPods(payload){ podsList=(payload.pods||[]).slice().sort((a,b)=> podSortAsc ? a.name.localeCompare(b.name) : b.name.localeCompare(a.name)); focusPod=payload.focus; const card=document.getElementById('podsCard'); card.style.display='flex'; const tbody=document.querySelector('#podsTable tbody'); tbody.innerHTML=''; podsList.forEach(p=>{ const tr=document.createElement('tr'); tr.className='pointer'+(p.name===focusPod?' focused-row':''); tr.onclick=()=>{ ws.send(JSON.stringify({action:'focus',pod:p.name})); }; const ready=p.ready+'/'+p.total; tr.innerHTML='<td>'+p.name+'</td><td>'+ (p.namespace||'') +'</td><td>'+p.phase+'</td><td>'+ready+'</td><td>'+p.restarts+'</td>'; tbody.appendChild(tr); }); const ind=document.getElementById('podsNameSort'); ind.textContent= podSortAsc ? '▲':'▼'; }
 // attach header click once
 (function(){ const h=document.getElementById('podsNameHeader'); if(h && !h._wired){ h._wired=true; h.onclick=()=>{ podSortAsc=!podSortAsc; renderPods({pods:podsList,focus:focusPod}); }; }})();
-function renderPod(p){ window._lastPodObj=p; podName=p.name; document.getElementById('logsPod').style.display='inline-flex'; document.getElementById('logsPod').textContent=p.name; const phaseEl=document.getElementById('phase'); phaseEl.textContent=p.phase; phaseEl.className='badge phase-'+(p.phase||'UNKNOWN').toUpperCase(); const cbody=document.querySelector('#containers tbody'); cbody.innerHTML=''; let totalRestarts=0; p.containers.forEach(c=>{ totalRestarts+=c.restarts; const tr=document.createElement('tr'); tr.innerHTML='<td>'+c.name+'</td><td>'+c.state+'</td><td>'+c.restarts+'</td><td class="fade">'+c.image+'</td>'; cbody.appendChild(tr); }); const sel=document.getElementById('containerSelect'); const prev=sel.value; sel.innerHTML=''; p.containers.forEach(c=>{ const o=document.createElement('option'); o.value=c.name; o.textContent=c.name; if(c.name===prev) o.selected=true; sel.appendChild(o); }); sel.onchange=()=> setContainer(sel.value); const envSel=document.getElementById('envContainerSelect'); const prevEnv=envSel.value; envSel.innerHTML=''; p.containers.forEach(c=>{ const o=document.createElement('option'); o.value=c.name; o.textContent=c.name; if(c.name===prevEnv) o.selected=true; envSel.appendChild(o); }); envSel.onchange=()=> renderEnvForContainer(envSel.value, p); if(!prevEnv && p.containers.length){ envSel.value=p.containers[0].name; } renderEnvForContainer(envSel.value, p); const ready = p.containers.filter(c=>c.ready).length; const total = p.containers.length; const stats=[ ['Pod', p.name], ['Namespace', p.namespace], ['Phase', p.phase], ['Ready', `${ready}/${total}`], ['Total Restarts', totalRestarts], ['Node IP', p.node||'' ], ['Pod IP', p.podIP||'' ], ['Age', formatAge(p.ageSeconds) ] ]; const statsRoot=document.getElementById('statusStats'); statsRoot.innerHTML=''; stats.forEach(s=>{ const box=document.createElement('div'); box.className='stat'; box.innerHTML='<span class="label">'+s[0]+'</span><span class="value">'+s[1]+'</span>'; statsRoot.appendChild(box); }); document.querySelectorAll('#podsTable tbody tr').forEach(tr=>{ if(tr.firstChild && tr.firstChild.textContent===p.name){ tr.classList.add('focused-row'); } else { tr.classList.remove('focused-row'); }}); }
+function renderPod(p){ window._lastPodObj=p; podName=p.name; document.getElementById('logsPod').style.display='inline-flex'; document.getElementById('logsPod').textContent=p.name; const phaseEl=document.getElementById('phase'); phaseEl.textContent=p.phase; phaseEl.className='badge phase-'+(p.phase||'UNKNOWN').toUpperCase(); const cbody=document.querySelector('#containers tbody'); cbody.innerHTML=''; let totalRestarts=0; p.containers.forEach(c=>{ totalRestarts+=c.restarts; const tr=document.createElement('tr'); tr.innerHTML='<td>'+c.name+'</td><td>'+c.state+'</td><td>'+c.restarts+'</td><td class="fade">'+c.image+'</td>'; cbody.appendChild(tr); }); const sel=document.getElementById('containerSelect'); const prev=sel.value; sel.innerHTML=''; p.containers.forEach(c=>{ const o=document.createElement('option'); o.value=c.name; o.textContent=c.name; if(c.name===prev) o.selected=true; sel.appendChild(o); }); sel.onchange=()=> setContainer(sel.value); const envSel=document.getElementById('envContainerSelect'); const prevEnv=envSel.value; envSel.innerHTML=''; p.containers.forEach(c=>{ const o=document.createElement('option'); o.value=c.name; o.textContent=c.name; if(c.name===prevEnv) o.selected=true; envSel.appendChild(o); }); envSel.onchange=()=> renderEnvForContainer(envSel.value, p); if(!prevEnv && p.containers.length){ envSel.value=p.containers[0].name; } renderEnvForContainer(envSel.value, p); const ready = p.containers.filter(c=>c.ready).length; const total = p.containers.length; const primary=[ ['Namespace', p.namespace], ['Pod', p.name], ['Phase', p.phase], ['Ready', `${ready}/${total}`] ]; const secondary=[ ['Total Restarts', totalRestarts], ['Node IP', p.node||'' ], ['Pod IP', p.podIP||'' ], ['Age', formatAge(p.ageSeconds) ] ]; const statsRoot=document.getElementById('statusStats'); statsRoot.innerHTML=''; const topRow=document.createElement('div'); topRow.className='status-row primary-row'; primary.forEach(s=>{ const box=document.createElement('div'); box.className='stat'; box.innerHTML='<span class="label">'+s[0]+'</span><span class="value">'+s[1]+'</span>'; topRow.appendChild(box); }); const secondRow=document.createElement('div'); secondRow.className='status-row secondary-row'; secondary.forEach(s=>{ const box=document.createElement('div'); box.className='stat'; box.innerHTML='<span class="label">'+s[0]+'</span><span class="value">'+s[1]+'</span>'; secondRow.appendChild(box); }); statsRoot.appendChild(topRow); statsRoot.appendChild(secondRow); document.querySelectorAll('#podsTable tbody tr').forEach(tr=>{ if(tr.firstChild && tr.firstChild.textContent===p.name){ tr.classList.add('focused-row'); } else { tr.classList.remove('focused-row'); }}); }
 function renderEnvForContainer(containerName, pod){ const card=document.getElementById('envCard'); const tbody=document.querySelector('#envTable tbody'); tbody.innerHTML=''; if(!containerName){ card.style.display='none'; return; } const container=(pod.containers||[]).find(c=>c.name===containerName); if(!container){ card.style.display='none'; return; } card.style.display='flex'; (container.env||[]).forEach(ev=>{ const tr=document.createElement('tr'); tr.innerHTML='<td>'+ev.name+'</td><td class="fade">'+(ev.value||'')+'</td>'; tbody.appendChild(tr); }); if((container.env||[]).length===0){ const tr=document.createElement('tr'); tr.innerHTML='<td colspan="2" class="fade">No env vars</td>'; tbody.appendChild(tr); }}
-function appendEvent(e){ const tbody=document.querySelector('#events tbody'); const tr=document.createElement('tr'); let typeClass=''; if(e.type==='Warning'){ typeClass='style="color:var(--warn);font-weight:600"'; } else if(e.type==='Error'){ typeClass='style="color:var(--danger);font-weight:600"'; } else if(e.type){ typeClass='style="color:var(--ok);font-weight:500"'; } const ageDisplay = formatAge(e.ageSeconds); tr.innerHTML='<td>'+e.pod+'</td><td '+typeClass+'>'+ (e.type || '') +'</td><td>'+ (e.reason||'') +'</td><td>'+ e.message +'</td><td>'+ageDisplay+'</td>'; tbody.prepend(tr); while(tbody.children.length>300) tbody.removeChild(tbody.lastChild); }
+function renderEvents(){ const tbody=document.querySelector('#events tbody'); tbody.innerHTML=''; if(!focusPod){ return; } const filtered=allEvents.filter(e=>e.pod===focusPod).slice(-300).reverse(); if(filtered.length===0){ const tr=document.createElement('tr'); tr.innerHTML='<td colspan="5" class="fade">No events</td>'; tbody.appendChild(tr); return;} filtered.forEach(e=>{ const tr=document.createElement('tr'); let typeClass=''; if(e.type==='Warning'){ typeClass='style="color:var(--warn);font-weight:600"'; } else if(e.type==='Error'){ typeClass='style="color:var(--danger);font-weight:600"'; } else if(e.type){ typeClass='style="color:var(--ok);font-weight:500"'; } const ageDisplay = formatAge(e.ageSeconds); tr.innerHTML='<td>'+e.pod+'</td><td '+typeClass+'>'+ (e.type || '') +'</td><td>'+ (e.reason||'') +'</td><td>'+ e.message +'</td><td>'+ageDisplay+'</td>'; tbody.appendChild(tr); }); }
+// Remove old appendEvent usage compatibility
+function appendEvent(e){ allEvents.push(e); if(allEvents.length>3000) allEvents=allEvents.slice(-3000); if(e.pod===focusPod){ renderEvents(); } }
 function appendLog(line){ const el=document.getElementById('logs'); el.append(line+'\n'); if(following) el.scrollTop=el.scrollHeight; }
 function setContainer(name, force=false){ if(!podName) return; if(!force && name===currentContainer) return; currentContainer=name; ws.send(JSON.stringify({action:'subscribe',channel:'logs',pod:podName,container:name})); document.getElementById('logs').textContent=''; }
-function renderMetrics(m){ if(m.disabled){ document.getElementById('metricsNote').textContent='Metrics not available'; return;} document.getElementById('metricsNote').textContent=''; const tbody=document.querySelector('#metrics tbody'); tbody.innerHTML=''; (m.containers||[]).forEach(c=>{ const tr=document.createElement('tr'); tr.innerHTML='<td>'+c.name+'</td><td>'+c.cpu+'</td><td>'+c.memoryMiB+'</td>'; tbody.appendChild(tr); }); }
+function renderMetrics(m){ if(m.disabled){ document.getElementById('metricsNote').textContent='Metrics not available'; return;} document.getElementById('metricsNote').textContent=''; if(m.thresholds){ cpuLimitRed=m.thresholds.cpuLimitRed; memLimitRed=m.thresholds.memLimitRed; }
+  const tbody=document.querySelector('#metrics tbody'); tbody.innerHTML=''; (m.containers||[]).forEach(c=>{ const tr=document.createElement('tr');
+    const cpuLimClass = (c.cpuPctOfLimit!=null && c.cpuPctOfLimit>=cpuLimitRed)?' class="metric-warn"':'';
+    const memLimClass = (c.memPctOfLimit!=null && c.memPctOfLimit>=memLimitRed)?' class="metric-warn"':'';
+    tr.innerHTML='<td>'+c.name+'</td>'+
+      '<td>'+fmt(c.cpu)+'</td>'+
+      '<td>'+pct(c.cpuPctOfRequest)+'</td>'+
+      '<td'+cpuLimClass+'>'+pct(c.cpuPctOfLimit)+'</td>'+
+      '<td>'+fmt(c.memoryMiB)+'</td>'+
+      '<td>'+pct(c.memPctOfRequest)+'</td>'+
+      '<td'+memLimClass+'>'+pct(c.memPctOfLimit)+'</td>';
+    tbody.appendChild(tr); }); }
+function fmt(v){ return (v==null)?'':v; }
+function pct(v){ return (v==null)?'':v+'%'; }
  document.getElementById('followBtn').onclick=()=>{ following=!following; document.getElementById('followBtn').textContent= following? 'Pause':'Resume'; };
 </script></body></html>

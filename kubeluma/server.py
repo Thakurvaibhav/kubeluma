@@ -1,5 +1,11 @@
 from .dependencies import asyncio, json, re, time, dataclass, field, Dict, Any, Optional, Set, Path, FastAPI, WebSocket, WebSocketDisconnect, HTMLResponse, StaticFiles
 from .kube import load_kube, fetch_metrics, stream_logs
+import os
+import logging
+
+# Logging setup (level via KUBELUMA_LOG_LEVEL env or default INFO)
+logging.basicConfig(level=getattr(logging, os.getenv('KUBELUMA_LOG_LEVEL','INFO').upper(), logging.INFO), format='[%(asctime)s] %(levelname)s %(message)s')
+log = logging.getLogger('kubeluma')
 
 # Load HTML from file
 INDEX_HTML = (Path(__file__).parent / 'index.html').read_text(encoding='utf-8')
@@ -163,7 +169,7 @@ async def run_server(pod_pattern, namespace, kubeconfig, context, port, metrics_
                     nm = hub.pods[hub.focus_pod]['name']
                     m = await fetch_metrics(kube.metrics, ns, nm)
                     if m:
-                        hub.metrics[hub.focus_pod] = metrics_to_view(m)
+                        hub.metrics[hub.focus_pod] = metrics_to_view(m, hub.pods.get(hub.focus_pod))
                         await hub.broadcast({'type':'metrics','data':hub.metrics[hub.focus_pod]})
                     else:
                         await hub.broadcast({'type':'metrics','data':{'disabled':True}})
@@ -180,31 +186,46 @@ async def run_server(pod_pattern, namespace, kubeconfig, context, port, metrics_
                     pod_uids = {pv['uid'] for pv in hub.pods.values()}
                     pod_names = {pv['name'] for pv in hub.pods.values()}
                     loop = asyncio.get_event_loop()
+                    cycle_id = int(time.time())
+                    log.info(f"[events] cycle={cycle_id} namespace={ns} pods={len(pod_names)} uids={len(pod_uids)}")
                     try:
                         def _list_events_v1():
                             try:
                                 return kube.events.list_namespaced_event(namespace=ns)
-                            except Exception:
+                            except Exception as e:
+                                log.debug(f"[events] v1beta events API error: {e}")
                                 return None
                         def _list_core():
                             try:
                                 return kube.core.list_namespaced_event(namespace=ns)
-                            except Exception:
+                            except Exception as e:
+                                log.debug(f"[events] core events API error: {e}")
                                 return None
                         ev_list = await loop.run_in_executor(None, _list_events_v1)
+                        src = 'events.k8s.io'
                         if not ev_list or not getattr(ev_list, 'items', None):
                             ev_list = await loop.run_in_executor(None, _list_core)
+                            src = 'core'
+                        total_items = len(getattr(ev_list, 'items', []) or [])
+                        log.info(f"[events] cycle={cycle_id} source={src} total_items={total_items}")
+                        matched = skipped_seen = skipped_other = 0
                         for e in getattr(ev_list, 'items', []) or []:
                             try:
                                 uid = getattr(e.metadata, 'uid', None)
-                                if not uid or uid in seen:
+                                if not uid:
+                                    skipped_other += 1
+                                    continue
+                                if uid in seen:
+                                    skipped_seen += 1
                                     continue
                                 regarding = getattr(e, 'regarding', None) or getattr(e, 'involved_object', None)
                                 r_name = getattr(regarding, 'name', None) if regarding else None
                                 r_uid = getattr(regarding, 'uid', None) if regarding else None
                                 if not r_name:
+                                    skipped_other += 1
                                     continue
                                 if r_uid not in pod_uids and r_name not in pod_names:
+                                    skipped_other += 1
                                     continue
                                 evt_time = getattr(e, 'event_time', None)
                                 ts = None
@@ -218,11 +239,15 @@ async def run_server(pod_pattern, namespace, kubeconfig, context, port, metrics_
                                 msg_txt = getattr(e, 'note', None) or getattr(e, 'message', '') or ''
                                 data = {'pod': r_name,'type': getattr(e, 'type', '') or '','reason': getattr(e, 'reason', '') or '','message': msg_txt,'ageSeconds': age,'targetType': 'pod'}
                                 seen.add(uid)
+                                matched += 1
                                 await hub.broadcast({'type':'event','data':data})
-                            except Exception:
+                            except Exception as ex:
+                                skipped_other += 1
+                                log.debug(f"[events] cycle={cycle_id} exception processing event: {ex}")
                                 continue
-                    except Exception:
-                        pass
+                        log.info(f"[events] cycle={cycle_id} matched={matched} skipped_seen={skipped_seen} skipped_other={skipped_other} newly_seen={len(seen)}")
+                    except Exception as ex:
+                        log.warning(f"[events] cycle error: {ex}")
             await asyncio.sleep(6)
 
     async def stream_log_task():
@@ -265,7 +290,7 @@ async def run_server(pod_pattern, namespace, kubeconfig, context, port, metrics_
     loop.create_task(stream_log_task())
 
     import uvicorn
-    config = uvicorn.Config(app, host=host, port=port, log_level='warning')
+    config = uvicorn.Config(app, host=host, port=port, log_level=os.getenv('KUBELUMA_UVICORN_LEVEL','info'))
     server = uvicorn.Server(config)
     await server.serve()
 
@@ -290,6 +315,7 @@ def pod_to_view(p):
             state = f"terminated({cstat.state.terminated.reason})"
         env_list = []
         sc = spec_map.get(cstat.name)
+        # collect env vars (existing logic retained)
         if sc and getattr(sc, 'env', None):
             for ev in sc.env:
                 try:
@@ -318,6 +344,20 @@ def pod_to_view(p):
                     env_list.append({'name': ev.name, 'value': val_display})
                 except Exception:
                     continue
+        # NEW: capture resource requests / limits
+        res_req = {}
+        res_lim = {}
+        try:
+            if sc and getattr(sc, 'resources', None):
+                rq = getattr(sc.resources, 'requests', None) or {}
+                lm = getattr(sc.resources, 'limits', None) or {}
+                for k in ('cpu','memory'):
+                    if rq.get(k):
+                        res_req[k] = rq.get(k)
+                    if lm.get(k):
+                        res_lim[k] = lm.get(k)
+        except Exception:
+            pass
         containers.append({
             'name': cstat.name,
             'ready': cstat.ready,
@@ -325,6 +365,7 @@ def pod_to_view(p):
             'state': state,
             'image': cstat.image,
             'env': env_list,
+            'resources': {'requests': res_req, 'limits': res_lim}
         })
     age_seconds = 0
     if p.metadata.creation_timestamp:
@@ -340,7 +381,18 @@ def pod_to_view(p):
         'containers': containers,
     }
 
-def metrics_to_view(m):
+# Configurable thresholds (percent of limit) with defaults
+CPU_LIMIT_RED_PCT = int(os.getenv('KUBELUMA_CPU_LIMIT_RED_PCT', '90'))
+MEM_LIMIT_RED_PCT = int(os.getenv('KUBELUMA_MEM_LIMIT_RED_PCT', '80'))
+
+# Replace metrics_to_view with percentage-aware version
+
+def metrics_to_view(m, pod_view=None):
+    # Build resource map {container: {'requests':..., 'limits':...}}
+    res_map = {}
+    if pod_view:
+        for c in pod_view.get('containers', []):
+            res_map[c['name']] = c.get('resources') or {}
     containers = []
     for c in m.get('containers', []):
         name = c['name']
@@ -348,18 +400,51 @@ def metrics_to_view(m):
         cpu_raw = usage.get('cpu', '0')
         mem_raw = usage.get('memory', '0')
         def parse_cpu(v):
-            if v.endswith('n'):
-                return int(v[:-1]) / 1_000_000
-            if v.endswith('m'):
-                return int(v[:-1])
-            return int(v) * 1000
+            try:
+                if v.endswith('n'): return int(v[:-1]) / 1_000_000  # n -> m
+                if v.endswith('m'): return int(v[:-1])
+                return float(v) * 1000  # cores -> m
+            except Exception:
+                return 0
         def parse_mem(v):
-            if v.endswith('Ki'):
-                return round(int(v[:-2]) / 1024, 2)
-            if v.endswith('Mi'):
-                return float(v[:-2])
-            if v.endswith('Gi'):
-                return float(v[:-2]) * 1024
-            return 0.0
-        containers.append({'name': name, 'cpu': parse_cpu(cpu_raw), 'memoryMiB': parse_mem(mem_raw)})
-    return {'containers': containers}
+            try:
+                if v.endswith('Ki'): return round(int(v[:-2]) / 1024, 2)
+                if v.endswith('Mi'): return float(v[:-2])
+                if v.endswith('Gi'): return float(v[:-2]) * 1024
+                if v.endswith('Ti'): return float(v[:-2]) * 1024 * 1024
+                return 0.0
+            except Exception:
+                return 0.0
+        cpu_m = parse_cpu(cpu_raw)
+        mem_mib = parse_mem(mem_raw)
+        req_cpu = lim_cpu = req_mem = lim_mem = None
+        pct_cpu_req = pct_cpu_lim = pct_mem_req = pct_mem_lim = None
+        if name in res_map:
+            rq = (res_map[name].get('requests') or {})
+            lm = (res_map[name].get('limits') or {})
+            if 'cpu' in rq:
+                req_cpu = parse_cpu(rq['cpu'])
+                if req_cpu: pct_cpu_req = round((cpu_m/req_cpu)*100,1)
+            if 'cpu' in lm:
+                lim_cpu = parse_cpu(lm['cpu'])
+                if lim_cpu: pct_cpu_lim = round((cpu_m/lim_cpu)*100,1)
+            if 'memory' in rq:
+                req_mem = parse_mem(rq['memory'])
+                if req_mem: pct_mem_req = round((mem_mib/req_mem)*100,1)
+            if 'memory' in lm:
+                lim_mem = parse_mem(lm['memory'])
+                if lim_mem: pct_mem_lim = round((mem_mib/lim_mem)*100,1)
+        containers.append({
+            'name': name,
+            'cpu': cpu_m,
+            'memoryMiB': mem_mib,
+            'cpuRequest': req_cpu,
+            'cpuLimit': lim_cpu,
+            'memRequestMiB': req_mem,
+            'memLimitMiB': lim_mem,
+            'cpuPctOfRequest': pct_cpu_req,
+            'cpuPctOfLimit': pct_cpu_lim,
+            'memPctOfRequest': pct_mem_req,
+            'memPctOfLimit': pct_mem_lim,
+        })
+    return {'containers': containers, 'thresholds': {'cpuLimitRed': CPU_LIMIT_RED_PCT, 'memLimitRed': MEM_LIMIT_RED_PCT}}

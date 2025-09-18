@@ -6,6 +6,9 @@ import logging
 # Logging setup (level via KUBELUMA_LOG_LEVEL env or default INFO)
 logging.basicConfig(level=getattr(logging, os.getenv('KUBELUMA_LOG_LEVEL','INFO').upper(), logging.INFO), format='[%(asctime)s] %(levelname)s %(message)s')
 log = logging.getLogger('kubeluma')
+# Helper for safe exception logging
+def _exc(msg: str, exc: Exception):
+    log.warning(f"{msg}: {exc.__class__.__name__}: {exc}")
 
 # Load HTML from file
 INDEX_HTML = (Path(__file__).parent / 'index.html').read_text(encoding='utf-8')
@@ -47,6 +50,7 @@ async def index():
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
+    log.info("[ws] client connected")
     hub.clients.add(ws)
     try:
         while True:
@@ -54,9 +58,11 @@ async def websocket_endpoint(ws: WebSocket):
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
+                log.debug("[ws] discard non-json message")
                 continue
             action = msg.get('action')
             if action == 'subscribe' and msg.get('channel')=='pod':
+                log.debug("[ws] subscribe pod summary")
                 if hub.pods:
                     pods_summary = []
                     for n,pv in hub.pods.items():
@@ -69,13 +75,16 @@ async def websocket_endpoint(ws: WebSocket):
             elif action == 'subscribe' and msg.get('channel')=='logs':
                 key = f"{msg.get('pod')}::{msg.get('container')}"
                 hub.logs_subs.setdefault(key,set()).add(ws)
+                log.debug(f"[ws] subscribe logs key={key}")
             elif action == 'focus':
                 pod = msg.get('pod')
                 if pod in hub.pods:
+                    old = hub.focus_pod
                     hub.focus_pod = pod
+                    log.info(f"[focus] changed {old} -> {pod}")
                     await hub.broadcast({'type':'pod','data':hub.pods[pod]})
     except WebSocketDisconnect:
-        pass
+        log.info("[ws] client disconnected")
     finally:
         hub.clients.discard(ws)
         for subs in hub.logs_subs.values():
@@ -89,6 +98,7 @@ async def set_pattern(payload: Dict[str, str]):
     try:
         hub.regex = re.compile(pattern)
         hub.regex_text = pattern
+        log.info(f"[pattern] set pattern='{pattern}'")
     except re.error as e:
         return {'error': f'invalid regex: {e}'}
     hub.focus_pod = None
@@ -117,8 +127,11 @@ async def run_server(pod_pattern, namespace, kubeconfig, context, port, metrics_
     hub.regex = pod_pattern  # may be None until set via API
     hub.regex_text = getattr(pod_pattern, 'pattern', None) if pod_pattern else None
     hub.refresh_event = asyncio.Event()
+    POD_REFRESH_SEC = int(os.getenv('KUBELUMA_POD_REFRESH_SEC','5'))
+    log.info(f"[pods] refresh interval={POD_REFRESH_SEC}s")
 
     async def refresh_pods():
+        last_broadcast_keys: Set[str] = set()
         while True:
             loop = asyncio.get_event_loop()
             def _list():
@@ -126,7 +139,8 @@ async def run_server(pod_pattern, namespace, kubeconfig, context, port, metrics_
                     if namespace:
                         return kube.core.list_namespaced_pod(namespace=namespace)
                     return kube.core.list_pod_for_all_namespaces()
-                except Exception:
+                except Exception as exc:
+                    _exc('[pods] list error', exc)
                     return None
             plist = await loop.run_in_executor(None, _list)
             changed = False
@@ -137,27 +151,40 @@ async def run_server(pod_pattern, namespace, kubeconfig, context, port, metrics_
                     if not hub.regex.search(name):
                         continue
                     pods_view[name] = pod_to_view(p)
-                if pods_view:
-                    if set(pods_view.keys()) != set(hub.pods.keys()):
-                        changed = True
-                    hub.pods = pods_view
+                # Always update hub.pods (even if empty) so deletions reflect
+                prev_keys = set(hub.pods.keys())
+                new_keys = set(pods_view.keys())
+                if new_keys != prev_keys:
+                    changed = True
+                    log.info(f"[pods] key change prev={len(prev_keys)} new={len(new_keys)} added={len(new_keys-prev_keys)} removed={len(prev_keys-new_keys)}")
+                hub.pods = pods_view
+                # Focus management
+                if hub.pods:
                     if not hub.focus_pod or hub.focus_pod not in hub.pods:
                         hub.focus_pod = sorted(hub.pods.keys())[0]
                         changed = True
+                        log.info(f"[pods] focus set {hub.focus_pod}")
+                else:
+                    if hub.focus_pod is not None:
+                        hub.focus_pod = None
+                        changed = True
+                        log.info("[pods] focus cleared (no matches)")
+                if changed:
                     pods_summary = []
                     for n,pv in hub.pods.items():
                         restarts = sum(c['restarts'] for c in pv['containers'])
                         ready = sum(1 for c in pv['containers'] if c['ready'])
                         pods_summary.append({'name':n,'namespace':pv['namespace'],'phase':pv['phase'],'restarts':restarts,'ready':ready,'total':len(pv['containers'])})
                     await hub.broadcast({'type':'pods','data':{'pods':pods_summary,'focus':hub.focus_pod,'pattern':hub.regex_text}})
-                    if changed:
+                    if hub.focus_pod:
                         await hub.broadcast({'type':'pod','data':hub.pods[hub.focus_pod]})
+                last_broadcast_keys = new_keys
             elif not hub.regex:
                 await hub.broadcast({'type':'awaitingPattern'})
             # wait for either event or timeout
             try:
                 hub.refresh_event.clear()
-                await asyncio.wait_for(hub.refresh_event.wait(), timeout=5)
+                await asyncio.wait_for(hub.refresh_event.wait(), timeout=POD_REFRESH_SEC)
             except asyncio.TimeoutError:
                 pass
 
@@ -167,18 +194,25 @@ async def run_server(pod_pattern, namespace, kubeconfig, context, port, metrics_
                 try:
                     ns = hub.pods[hub.focus_pod]['namespace']
                     nm = hub.pods[hub.focus_pod]['name']
+                    start = time.time()
                     m = await fetch_metrics(kube.metrics, ns, nm)
+                    dur = (time.time()-start)*1000
+                    log.debug(f"[metrics] pod={nm} fetched in {dur:.1f}ms present={bool(m)}")
                     if m:
                         hub.metrics[hub.focus_pod] = metrics_to_view(m, hub.pods.get(hub.focus_pod))
                         await hub.broadcast({'type':'metrics','data':hub.metrics[hub.focus_pod]})
                     else:
                         await hub.broadcast({'type':'metrics','data':{'disabled':True}})
-                except Exception:
+                except Exception as exc:
+                    _exc('[metrics] error', exc)
                     await hub.broadcast({'type':'metrics','data':{'disabled':True}})
             await asyncio.sleep(metrics_interval)
 
     async def poll_events():
-        seen: Set[str] = set()
+        # store uid -> first_seen_ts so memory does not grow unbounded
+        seen: Dict[str,float] = {}
+        SEEN_MAX = 5000
+        SEEN_TTL = 3600  # seconds
         while True:
             if hub.pods:
                 ns = namespace or next(iter(hub.pods.values()))['namespace']
@@ -209,6 +243,7 @@ async def run_server(pod_pattern, namespace, kubeconfig, context, port, metrics_
                         total_items = len(getattr(ev_list, 'items', []) or [])
                         log.info(f"[events] cycle={cycle_id} source={src} total_items={total_items}")
                         matched = skipped_seen = skipped_other = 0
+                        now_ts = time.time()
                         for e in getattr(ev_list, 'items', []) or []:
                             try:
                                 uid = getattr(e.metadata, 'uid', None)
@@ -238,14 +273,28 @@ async def run_server(pod_pattern, namespace, kubeconfig, context, port, metrics_
                                 age = int(time.time() - ts) if ts else 0
                                 msg_txt = getattr(e, 'note', None) or getattr(e, 'message', '') or ''
                                 data = {'pod': r_name,'type': getattr(e, 'type', '') or '','reason': getattr(e, 'reason', '') or '','message': msg_txt,'ageSeconds': age,'targetType': 'pod'}
-                                seen.add(uid)
+                                seen[uid] = now_ts
                                 matched += 1
                                 await hub.broadcast({'type':'event','data':data})
                             except Exception as ex:
                                 skipped_other += 1
                                 log.debug(f"[events] cycle={cycle_id} exception processing event: {ex}")
                                 continue
-                        log.info(f"[events] cycle={cycle_id} matched={matched} skipped_seen={skipped_seen} skipped_other={skipped_other} newly_seen={len(seen)}")
+                        # prune seen
+                        if len(seen) > SEEN_MAX:
+                            before = len(seen)
+                            cutoff = time.time() - SEEN_TTL
+                            for k,v in list(seen.items()):
+                                if v < cutoff:
+                                    seen.pop(k, None)
+                            # if still too big, drop oldest
+                            if len(seen) > SEEN_MAX:
+                                for k,_ in sorted(seen.items(), key=lambda kv: kv[1])[:len(seen)-SEEN_MAX]:
+                                    seen.pop(k, None)
+                            pruned = before - len(seen)
+                            if pruned:
+                                log.info(f"[events] pruned {pruned} old seen entries size={len(seen)}")
+                        log.info(f"[events] cycle={cycle_id} matched={matched} skipped_seen={skipped_seen} skipped_other={skipped_other} seen_size={len(seen)}")
                     except Exception as ex:
                         log.warning(f"[events] cycle error: {ex}")
             await asyncio.sleep(6)
